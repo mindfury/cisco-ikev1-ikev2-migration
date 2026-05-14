@@ -179,15 +179,8 @@ resource "aws_vpn_connection" "lab" {
   tunnel1_phase1_lifetime_seconds      = 28800   # AWS provider max: 28800
   tunnel2_phase1_lifetime_seconds      = 28800
 
-  # Phase 2
-  tunnel1_phase2_encryption_algorithms = ["AES256"]
-  tunnel2_phase2_encryption_algorithms = ["AES256"]
-  tunnel1_phase2_integrity_algorithms  = ["SHA2-256", "SHA2-512"]
-  tunnel2_phase2_integrity_algorithms  = ["SHA2-256", "SHA2-512"]
-  tunnel1_phase2_dh_group_numbers      = [14, 21]
-  tunnel2_phase2_dh_group_numbers      = [14, 21]
-  tunnel1_phase2_lifetime_seconds      = 3600    # AWS provider max: 3600
-  tunnel2_phase2_lifetime_seconds      = 3600
+  # Phase 2 — use AWS defaults (permissive) to allow IKEv1 QM to complete;
+  # once VTI/BGP is validated end-to-end, tighten these back to AES256/SHA2/group14.
 
   tunnel1_dpd_timeout_action = "restart"
   tunnel2_dpd_timeout_action = "restart"

@@ -12,6 +12,7 @@ Usage:
 import argparse
 import asyncio
 import json
+import re
 import subprocess
 import sys
 import textwrap
@@ -66,11 +67,8 @@ def build_config(out: dict) -> str:
 
     config = textwrap.dedent(f"""\
         conf t
-        !
-        ! ── Cleanup: remove previous lab config ──────────────────────────────
         interface GigabitEthernet0/0
          no crypto map CMAP-AWS
-        !
         no crypto map CMAP-AWS 10 ipsec-isakmp
         no crypto map CMAP-AWS 20 ipsec-isakmp
         no crypto ikev2 profile AWS-IKEV2-PROFILE
@@ -78,8 +76,14 @@ def build_config(out: dict) -> str:
         no crypto ikev2 policy AWS-IKEV2-POLICY
         no crypto ikev2 proposal AWS-IKEV2-PROPOSAL
         no crypto ipsec transform-set TS-AWS-V1
+        no crypto ipsec transform-set TS-AWS-VTI
         no ip access-list extended ACL-AWS-VPN
         no router bgp 65000
+        no crypto isakmp key LabGWJ5YCTjSJtRFvqB0Hxrv address 3.211.150.159
+        no crypto isakmp key Labhnv44RJsmhLXnZ4ZpdKro address 34.192.251.234
+        no crypto ipsec profile AWS-VTI-PROFILE
+        no interface Tunnel1
+        no interface Tunnel2
         !
         ! ── IKEv1 Phase 1 ────────────────────────────────────────────────────
         ! group 2 PFS in ipsec profile will be flagged WEAK by migration tool
@@ -116,6 +120,10 @@ def build_config(out: dict) -> str:
          tunnel mode ipsec ipv4
          tunnel destination {t2_outside}
          tunnel protection ipsec profile AWS-VTI-PROFILE
+        !
+        ! ── Static null route — required for BGP to advertise 10.0.1.0/24 ─────
+        ! Loopback0 is /32; BGP 'network' command needs exact /24 in RIB.
+        ip route 10.0.1.0 255.255.255.0 Null0
         !
         ! ── BGP ──────────────────────────────────────────────────────────────
         router bgp 65000
@@ -177,12 +185,27 @@ async def push_config(config: str, dry_run: bool):
         kex_algs=["diffie-hellman-group14-sha1", "diffie-hellman-group-exchange-sha1"],
         server_host_key_algs=["ssh-rsa"],
     ) as conn:
-        print("Connected — pushing config ...")
-        result = await conn.run(config, check=False)
-        if result.stdout:
-            print(result.stdout)
-        if result.stderr:
-            print("STDERR:", result.stderr, file=sys.stderr)
+        print("Connected — pushing config via interactive PTY ...")
+        proc = await conn.create_process(request_pty=True, term_type="vt100")
+
+        # Drain login banner / prompt
+        buf = ""
+        prompt = re.compile(r'c2911[#>]')
+        while not prompt.search(buf):
+            buf += await asyncio.wait_for(proc.stdout.read(4096), timeout=10)
+
+        # Send each non-empty line individually, read until prompt after each
+        lines = [l.strip() for l in config.splitlines()]
+        for line in lines:
+            proc.stdin.write(line + "\n")
+            buf = ""
+            try:
+                while not prompt.search(buf):
+                    buf += await asyncio.wait_for(proc.stdout.read(4096), timeout=5)
+            except asyncio.TimeoutError:
+                pass  # some commands (write memory) take a moment — keep going
+
+        proc.stdin.write("exit\n")
         print("Done.")
 
 

@@ -13,16 +13,17 @@
 3. [Prerequisites](#3-prerequisites)
 4. [AWS Side: Verifying and Preparing the VPN Connection](#4-aws-side-verifying-and-preparing-the-vpn-connection)
 5. [Pre-Migration Checklist](#5-pre-migration-checklist)
-6. [File Mode: Step-by-Step](#6-file-mode-step-by-step)
-7. [Reviewing the Generated Config](#7-reviewing-the-generated-config)
-8. [Applying the Config](#8-applying-the-config)
-9. [Validation](#9-validation)
-10. [Rollback](#10-rollback)
-11. [Device Mode (RESTCONF) — Advanced](#11-device-mode-restconf--advanced)
-12. [Algorithm Reference](#12-algorithm-reference)
-13. [Known Limitations](#13-known-limitations)
-14. [Troubleshooting](#14-troubleshooting)
-15. [Lab Environment (OpenTofu/Terraform)](#15-lab-environment-opentofuterraform)
+6. [File Mode: Policy-Based (Crypto Map)](#6-file-mode-policy-based-crypto-map)
+7. [File Mode: Route-Based (VTI + BGP)](#7-file-mode-route-based-vti--bgp)
+8. [Reviewing the Generated Config](#8-reviewing-the-generated-config)
+9. [Applying the Config](#9-applying-the-config)
+10. [Validation](#10-validation)
+11. [Rollback](#11-rollback)
+12. [Device Mode (RESTCONF) — Advanced](#12-device-mode-restconf--advanced)
+13. [Algorithm Reference](#13-algorithm-reference)
+14. [Known Limitations](#14-known-limitations)
+15. [Troubleshooting](#15-troubleshooting)
+16. [Lab Environment (OpenTofu/Terraform)](#16-lab-environment-opentofuterraform)
 
 ---
 
@@ -55,11 +56,15 @@ This means you can test IKEv2 in production, confirm the tunnels are healthy, an
 
 ## 2. How the Migration Works
 
+The tool handles two VPN architectures. Both produce ready-to-paste CLI blocks.
+
+### Policy-based VPN (crypto map)
+
 ```
 IKEv1 config (show run)
         │
         ▼
-  ConfigParser / RestconfConfigParser
+  ConfigParser
         │  parses: isakmp policies, PSKs, transform-sets, crypto map entries
         │
         ▼
@@ -76,13 +81,42 @@ IKEv1 config (show run)
   Ready-to-paste CLI block (or RESTCONF PATCH payload in device mode)
 ```
 
-### What "targeted for migration" means
+A crypto map entry is targeted if it is `ipsec-isakmp` type and does **not** already have `set ikev2-profile`. Entries already migrated are skipped.
 
-An entry is targeted if:
-- It is `ipsec-isakmp` type (static crypto map)
-- It does **not** already have `set ikev2-profile` configured
+### Route-based VPN (VTI + BGP)
 
-Entries already migrated are skipped. Partial migration states are handled correctly.
+```
+IKEv1 config (show run)
+        │
+        ▼
+  ConfigParser
+        │  parses: isakmp policies, PSKs, transform-sets,
+        │          crypto ipsec profiles, Tunnel interfaces,
+        │          BGP neighbors
+        │
+        ▼
+  IKEv2ConfigGenerator
+        │  generates:
+        │    - crypto ikev2 proposal / policy / keyring / profile  (same as above)
+        │    - crypto ipsec profile updates:
+        │        set transform-set <upgraded-TS>
+        │        set pfs group21
+        │        set ikev2-profile AWS-IKEV2-PROFILE
+        │    - NOTE: tunnel interfaces and BGP are NOT modified
+        │
+        ▼
+  Ready-to-paste CLI block
+```
+
+Tunnel interface addresses, sources, and destinations are preserved. BGP neighbors running over the tunnel inside IPs continue operating without change — BGP is independent of the IKE version.
+
+### IKEv1 and IKEv2 coexistence
+
+IKEv1 and IKEv2 can coexist on the same router and the same UDP 500/4500 ports. Every IKE packet header carries a Major Version field (1 or 2); IOS XE maintains separate SA databases for each. This means:
+
+- You can apply the IKEv2 config without clearing existing IKEv1 SAs
+- Tunnels migrate one at a time as IKEv1 SAs expire and renegotiate
+- The `set ikev2-profile` line is the only activation switch — add it to go IKEv2, remove it to revert to IKEv1
 
 ---
 
@@ -195,10 +229,12 @@ Work through this before generating or applying any config.
 
 - [ ] `show crypto isakmp sa` — confirm existing IKEv1 SAs are ACTIVE (QM_IDLE)
 - [ ] `show crypto ipsec sa | include encaps|decaps` — confirm bidirectional traffic is flowing
-- [ ] `show version` — confirm IOS XE version and platform
+- [ ] `show version` — confirm IOS XE version and platform (IKEv2 VTI requires IOS XE — see Known Limitations)
 - [ ] `show crypto engine accelerator statistic` — note current crypto engine load
 - [ ] Copy `show running-config` to a file — this is the input to the tool
-- [ ] Confirm `crypto map <name>` is applied to the correct WAN interface(s)
+- [ ] **Policy-based:** Confirm `crypto map <name>` is applied to the correct WAN interface(s)
+- [ ] **Route-based VTI:** Confirm `interface TunnelX / tunnel protection ipsec profile <name>` is present; confirm `router bgp` neighbors are Established (`show ip bgp summary`)
+- [ ] **Route-based VTI with BGP prefix advertisement:** Confirm the advertised network prefix (`network X.X.X.X mask Y.Y.Y.Y`) has an exact match in the routing table — `show ip route X.X.X.X`. If the router announces a /24 but only has a /32 loopback, add a null route: `ip route X.X.X.0 255.255.255.0 Null0`
 
 **In AWS:**
 
@@ -215,16 +251,12 @@ Work through this before generating or applying any config.
 
 ---
 
-## 6. File Mode: Step-by-Step
+## 6. File Mode: Policy-Based (Crypto Map)
 
 ### Step 1 — Capture the running config
 
 ```bash
-# Option A: paste from terminal session into a file
 ssh admin@<router-ip> "show running-config" > running.cfg
-
-# Option B: copy from your terminal emulator into running.cfg
-# (useful if you captured it during a maintenance window)
 ```
 
 ### Step 2 — Run the audit
@@ -268,15 +300,149 @@ cat ikev2_additions.txt
 
 ### Step 4 — Review and edit before applying
 
-See [Section 7](#7-reviewing-the-generated-config) for what to check.
+See [Section 8](#8-reviewing-the-generated-config) for what to check.
 
 ### Step 5 — Apply and validate
 
-See [Section 8](#8-applying-the-config) and [Section 9](#9-validation).
+See [Section 9](#9-applying-the-config) and [Section 10](#10-validation).
 
 ---
 
-## 7. Reviewing the Generated Config
+## 7. File Mode: Route-Based (VTI + BGP)
+
+Use this section if your VPN uses VTI tunnel interfaces with BGP (the route-based model common in newer AWS Site-to-Site VPN connections). The tool auto-detects which model is in use based on the presence of `interface Tunnel` + `tunnel protection ipsec profile` lines.
+
+### VTI/BGP migration overview
+
+```
+IKEv1 (before)                     IKEv2 (after)
+─────────────────────────────────   ──────────────────────────────────────
+crypto isakmp policy 10              crypto ikev2 proposal AWS-IKEV2-PROPOSAL
+ encr aes 256                         encryption aes-cbc-256
+ hash sha256                          integrity sha512
+ group 14                             prf sha512
+                                      group twenty-one
+
+crypto isakmp key PSK1 addr X.X.X.X  crypto ikev2 keyring AWS-IKEV2-KEYRING
+crypto isakmp key PSK2 addr Y.Y.Y.Y   peer PEER-X-X-X-X
+                                        address X.X.X.X
+                                        pre-shared-key local PSK1
+                                        pre-shared-key remote PSK1
+                                       peer PEER-Y-Y-Y-Y
+                                        address Y.Y.Y.Y
+                                        pre-shared-key local PSK2
+                                        pre-shared-key remote PSK2
+
+                                      crypto ikev2 profile AWS-IKEV2-PROFILE
+                                       match identity remote address 0.0.0.0
+                                       authentication remote pre-share
+                                       authentication local pre-share
+                                       keyring local AWS-IKEV2-KEYRING
+                                       dpd 10 3 periodic
+
+crypto ipsec profile AWS-VTI-PROFILE  crypto ipsec profile AWS-VTI-PROFILE
+ set transform-set TS-VTI              set transform-set TS-VTI-V2   ← upgraded
+ set pfs group2                        set pfs group21               ← upgraded
+                                       set ikev2-profile AWS-IKEV2-PROFILE  ← NEW
+
+interface Tunnel1                     interface Tunnel1
+ ip address 169.254.x.y/30             (unchanged)
+ tunnel source GigEth0/0
+ tunnel destination X.X.X.X
+ tunnel protection ipsec profile …
+
+router bgp 65000                      router bgp 65000
+ neighbor 169.254.x.x remote-as …     (unchanged)
+```
+
+### Step 1 — Verify BGP null route (if applicable)
+
+If your BGP `network` statement advertises a prefix that exists only as a loopback /32, you need a static null route to create the exact prefix in the routing table:
+
+```
+! Example: Loopback0 = 10.0.1.1/32, BGP network = 10.0.1.0/24
+ip route 10.0.1.0 255.255.255.0 Null0
+```
+
+Without this, the BGP `network` command silently fails to advertise the prefix and EC2 has no return path.
+
+Verify:
+```
+show ip route 10.0.1.0
+show ip bgp 10.0.1.0
+```
+
+Both should exist before proceeding.
+
+### Step 2 — Capture and audit
+
+```bash
+ssh admin@<router-ip> "show running-config" > running.cfg
+python3 ikev1_to_ikev2_migrate.py --config-file running.cfg --audit-only
+```
+
+Expected audit output for a VTI/BGP config:
+
+```
+! IKEv1 ISAKMP policies found: 1
+!   Policy 10: enc=aes 256 hash=sha256 group=14  *** WEAK-GROUP:14 (group21 preferred)
+!
+! IKEv1 pre-shared keys: 2
+!   Peer 35.169.156.239
+!   Peer 50.19.54.34
+!
+! IPsec profiles (VTI mode): 2
+!   AWS-VTI-PROFILE → transform-set TS-VTI, pfs group2  *** WEAK-PFS
+!
+! BGP neighbors detected (will not be modified):
+!   169.254.107.57 (remote-as 64512)
+!   169.254.16.113 (remote-as 64512)
+```
+
+### Step 3 — Generate and review
+
+```bash
+python3 ikev1_to_ikev2_migrate.py --config-file running.cfg > ikev2_additions.txt
+cat ikev2_additions.txt
+```
+
+The output will contain new IKEv2 objects plus updated `crypto ipsec profile` blocks. Tunnel interfaces and BGP will not appear — they are not modified.
+
+### Step 4 — Review generated config
+
+See [Section 8](#8-reviewing-the-generated-config) for common checks. Additional VTI-specific checks:
+
+- Keyring peer IPs must match the AWS VGW **outside** IP addresses (the `tunnel destination` values in the Tunnel interfaces)
+- The ipsec profile update adds `set ikev2-profile` — confirm the profile name matches what is referenced in the Tunnel interfaces (`tunnel protection ipsec profile <name>`)
+- The transform-set name will be `<original-name>-V2` if the original was weak — confirm the ipsec profile references this new name
+
+### Step 5 — Apply and validate
+
+See [Section 9](#9-applying-the-config) and [Section 10](#10-validation).
+
+**VTI-specific validation:**
+
+```
+! IKEv2 SAs — expect READY for both tunnel endpoints
+show crypto ikev2 sa
+
+! IPsec SAs — expect inbound/outbound ESP active
+show crypto ipsec sa | include peer|encaps|decaps
+
+! Tunnel line protocol — expect both up
+show interfaces Tunnel1 | include line protocol
+show interfaces Tunnel2 | include line protocol
+
+! BGP — expect Established, 1 prefix received per neighbor
+show ip bgp summary
+
+! Ping through the tunnel
+ping <ec2-ip> source <loopback-or-lan-ip> repeat 10
+```
+
+---
+
+## 8. Reviewing the Generated Config
 
 **Never paste the generated config directly without reviewing these items:**
 
@@ -337,7 +503,7 @@ The generated profile uses `lifetime 28800` (8 hours) to match AWS's IKEv2 defau
 
 ---
 
-## 8. Applying the Config
+## 9. Applying the Config
 
 ### In a maintenance window
 
@@ -375,7 +541,7 @@ write memory
 
 ---
 
-## 9. Validation
+## 10. Validation
 
 After applying and triggering renegotiation:
 
@@ -405,9 +571,9 @@ In AWS Console:
 
 ---
 
-## 10. Rollback
+## 11. Rollback
 
-If anything is wrong, rollback is a single command per crypto map entry:
+### Policy-based (crypto map) rollback
 
 ```
 conf t
@@ -423,7 +589,21 @@ clear crypto sa
 write memory
 ```
 
-This restores IKEv1 operation immediately. The IKEv2 objects (proposal, policy, keyring, profile) remain in the config but are inert without a crypto map binding. Clean them up once you've resolved the issue:
+### Route-based (VTI) rollback
+
+```
+conf t
+crypto ipsec profile AWS-VTI-PROFILE
+ no set ikev2-profile AWS-IKEV2-PROFILE
+ set transform-set TS-VTI          ! restore original transform-set name
+ set pfs group2                    ! restore original PFS (or whatever was there)
+!
+end
+clear crypto session
+write memory
+```
+
+In both cases, the IKEv2 objects (proposal, policy, keyring, profile) remain in the config but are inert without a binding. Once you've resolved the issue, remove them:
 
 ```
 conf t
@@ -432,14 +612,14 @@ no crypto ikev2 keyring AWS-IKEV2-KEYRING
 no crypto ikev2 policy AWS-IKEV2-POLICY
 no crypto ikev2 proposal AWS-IKEV2-PROPOSAL
 ! Also remove -V2 transform-sets if they were created
-no crypto ipsec transform-set TS-AWS-WEAK-V2
+no crypto ipsec transform-set TS-VTI-V2
 end
 write memory
 ```
 
 ---
 
-## 11. Device Mode (RESTCONF) — Advanced
+## 12. Device Mode (RESTCONF) — Advanced
 
 > **Status:** Structurally complete and tested for correctness against the Cisco IOS XE YANG model. End-to-end PATCH against a live ISR4431 has not been validated. Use file mode for the first production run.
 
@@ -495,7 +675,7 @@ Solution: temporarily enable type 0 for the migration, or manually edit the gene
 
 ---
 
-## 12. Algorithm Reference
+## 13. Algorithm Reference
 
 ### IKEv2 Proposal (Phase 1)
 
@@ -532,7 +712,7 @@ All values used by this tool fall within the AWS-supported set.
 
 ---
 
-## 13. Known Limitations
+## 14. Known Limitations
 
 ### PSK type 6 encryption
 
@@ -548,9 +728,25 @@ The tool generates a single `AWS-IKEV2-PROFILE` that matches all remote addresse
 - Narrow the `match identity remote address` in the generated profile, or
 - Create separate profiles and assign them to the appropriate crypto map entries
 
-### Classic IOS (non-XE)
+### Classic IOS (non-XE) — file mode only
 
 File mode works on classic IOS (15.x) — the generated config is valid IOS syntax. Device mode requires IOS XE (RESTCONF is IOS XE only). The ISR 2911 used for lab testing runs classic IOS 15.7 and was managed entirely in file mode.
+
+### IOS 15.7 (classic IOS, C2900) cannot initiate IKEv2 for VTI tunnels
+
+IOS 15.7(3)M3 on an ISR 2911 does NOT initiate IKEv2 when `set ikev2-profile` is configured under a `crypto ipsec profile` bound to a VTI tunnel. Even with an IKEv1 ISAKMP policy removed (forcing IKEv2 as the only option), zero IKEv2 SA activity is observed — the tunnels simply go down with no initiation attempt.
+
+This is a platform limitation of classic IOS on C2900 hardware. The tool generates correct IKEv2 config that works on IOS XE. For lab validation of VTI/BGP IKEv2, use an ISR4431, CSR1000v, or Cat8000v (any IOS XE platform).
+
+**IKEv1 VTI/BGP on IOS 15.7 was fully validated** (tunnels up, BGP established, traffic flowing). Only the IKEv2 side requires IOS XE.
+
+### AWS Phase 2 algorithm restrictions cause PROPOSAL_NOT_CHOSEN
+
+Setting Phase 2 (IPsec/ESP) algorithm restrictions on an AWS VPN connection — `Phase2EncryptionAlgorithms`, `Phase2IntegrityAlgorithms`, or `Phase2DHGroupNumbers` — causes AWS to immediately reject IKEv1 Phase 2 (Quick Mode) proposals with `PROPOSAL_NOT_CHOSEN` unless your router's transform-set and PFS group match exactly.
+
+The default behavior (no Phase 2 restrictions) allows AWS to accept a broad range of proposals. **Do not add Phase 2 restrictions unless you have verified exact algorithm alignment.** If you added them and are seeing `PROPOSAL_NOT_CHOSEN` in `debug crypto isakmp`, remove the restrictions and run `tofu apply` again (takes ~9 minutes for AWS to propagate).
+
+Phase 1 algorithm restrictions are unaffected by this issue.
 
 ### IOS XE version-specific command support
 
@@ -562,7 +758,7 @@ When IKEv1 SAs expire or are cleared, there will be a brief interruption (typica
 
 ---
 
-## 14. Troubleshooting
+## 15. Troubleshooting
 
 ### Tunnels don't come up after applying config
 
@@ -603,17 +799,73 @@ show crypto isakmp sa
 
 If IKEv1 SAs are still ACTIVE (QM_IDLE), the tunnel is still operating on IKEv1. Either wait for the SA lifetime to expire or clear with `clear crypto isakmp` / `clear crypto sa` in a maintenance window.
 
+### VTI tunnel line protocol is down (IKEv1)
+
+Symptom: `show interfaces Tunnel1` shows `line protocol is down`; `show crypto isakmp sa` shows QM_IDLE (Phase 1 up) but `show crypto ipsec sa` shows zero SAs and outbound SPI = 0x0.
+
+This is a Phase 2 negotiation failure. Run:
+
+```
+debug crypto isakmp
+terminal monitor
+clear crypto session
+```
+
+Watch for the error in the output. Common causes:
+
+- **`PROPOSAL_NOT_CHOSEN`** — AWS rejected the Phase 2 proposal. If you have `Phase2EncryptionAlgorithms`, `Phase2IntegrityAlgorithms`, or `Phase2DHGroupNumbers` set on the AWS VPN connection, those must exactly match your router's transform-set. The simplest fix is to remove all Phase 2 algorithm restrictions from the AWS VPN connection (see Known Limitations).
+- **`PAYLOAD_MALFORMED`** — often follows `PROPOSAL_NOT_CHOSEN` on retransmission; not an independent problem.
+- **`INVALID_SPI`** — stale SA; clear with `clear crypto session` and retry.
+
+### VTI tunnel is up but BGP neighbors won't establish
+
+1. Confirm tunnel line protocol is up: `show interfaces Tunnel1`
+2. Check BGP timers and state: `show ip bgp summary`
+3. Confirm the BGP neighbor IPs match the VGW **inside** IPs (169.254.x.x/30 addresses from the AWS VPN config), not the outside IPs
+4. Confirm no ACL is blocking TCP 179 on the tunnel interface
+
+### BGP is up but ping to EC2 fails (no return traffic)
+
+Most likely cause: the router is not advertising its LAN prefix to AWS, so EC2 has no route back.
+
+```
+show ip bgp summary               ← check "PfxRcd" column — should be 1 per neighbor
+show ip bgp neighbors X.X.X.X advertised-routes
+show ip route 10.0.1.0            ← must exist for BGP to advertise it
+```
+
+If `show ip route 10.0.1.0` returns nothing but you have a Loopback0 with a /32, add:
+
+```
+ip route 10.0.1.0 255.255.255.0 Null0
+```
+
+This creates the exact /24 prefix the BGP `network` command requires.
+
+Also check EC2 side: the VPC route table must have the on-premises CIDR pointing at the VGW (either static route or route propagation enabled).
+
+### IKEv2 SA shows nothing after applying VTI migration config (IOS XE)
+
+If `show crypto ikev2 sa` is empty after applying the migration config on IOS XE:
+
+1. Confirm the ipsec profile contains `set ikev2-profile AWS-IKEV2-PROFILE`: `show crypto ipsec profile`
+2. Confirm the IKEv2 profile is correct: `show crypto ikev2 profile`
+3. Clear sessions to force renegotiation: `clear crypto session`
+4. Watch: `debug crypto ikev2 error` + `debug crypto ikev2 packet`
+
+If tunnels go down and no IKEv2 activity is seen at all — no `IKEv2:(INIT)` lines in the debug — you may be on classic IOS (not IOS XE). Run `show version` and confirm the platform is IOS XE. Classic IOS 15.x on C2900 hardware cannot initiate IKEv2 for VTI tunnels.
+
 ### Running the test suite
 
 ```bash
 python3 -m pytest test_ikev1_to_ikev2_migrate.py -v
 ```
 
-All 101 tests should pass. This validates the parser, weak-algorithm detection, config generation, YANG payload structure, and end-to-end output correctness without requiring any network access.
+All 104 tests should pass. This validates the parser, weak-algorithm detection, config generation, VTI/BGP support, YANG payload structure, and end-to-end output correctness without requiring any network access.
 
 ---
 
-## 15. Lab Environment (OpenTofu/Terraform)
+## 16. Lab Environment (OpenTofu/Terraform)
 
 The `terraform/` directory contains a complete OpenTofu configuration that recreates the AWS lab used to validate this tool. It builds a VPC with an EC2 ping target, a VGW with a two-tunnel Site-to-Site VPN Connection, and generates ready-to-paste IKEv2 router config from the outputs.
 
@@ -639,7 +891,7 @@ Edit `terraform.tfvars`:
 ```hcl
 router_public_ip = "68.48.149.112"   # your router's current public IP
                                       # resolve mindfury.duckdns.org first if dynamic
-onprem_cidr      = "10.0.1.0/24"     # your LAN subnet — must match router ACL
+onprem_cidr      = "10.0.1.0/24"     # your LAN subnet — must match BGP network statement
 tunnel1_psk      = "LabPSKTunnel1A"  # 8–64 chars, alphanumeric + _ + . only
 tunnel2_psk      = "LabPSKTunnel2B"  # must differ from tunnel1_psk
 ```
@@ -651,40 +903,55 @@ tunnel2_psk      = "LabPSKTunnel2B"  # must differ from tunnel1_psk
 ```bash
 tofu init      # downloads AWS provider (~30s, first time only)
 tofu plan      # preview what will be created
-tofu apply     # deploy (~5 minutes, mostly waiting for VPN Connection)
+tofu apply     # deploy (~5–9 minutes, mostly waiting for VPN Connection)
 ```
 
-### Get the router config
+The lab uses `static_routes_only = false` (BGP/dynamic routing mode) to match real-world VTI/BGP deployments.
 
-Once `apply` completes, the `router_config` output contains ready-to-paste IKEv2 CLI with the actual tunnel IPs and PSKs filled in:
+> **Note:** Do not add Phase 2 algorithm restrictions (`tunnel1_phase2_*` variables) to the VPN connection unless you have verified exact algorithm alignment with the router's transform-set. These restrictions cause immediate `PROPOSAL_NOT_CHOSEN` rejections for IKEv1 Phase 2 negotiations that don't match exactly.
+
+### Push the pre-migration IKEv1 VTI/BGP config to the lab router
+
+After `tofu apply`, push the IKEv1 config to the ISR 2911 (or other lab router):
 
 ```bash
-tofu output -json router_config | python3 -c "import json,sys; print(json.load(sys.stdin))"
+# Dry run — shows what would be pushed without connecting
+python3 scripts/push_lab_config.py --dry-run
+
+# Push config and run verification checks
+python3 scripts/push_lab_config.py --verify
 ```
 
-Other useful outputs:
+Expected result after push:
+- Both tunnels UP (IKEv1, NAT-T on port 4500)
+- BGP established with both AWS VGW neighbors, 1 prefix received per tunnel
+- Ping to EC2 target 5/5
+
+### Get the router config outputs
 
 ```bash
 tofu output tunnel1_outside_ip   # AWS VGW tunnel 1 endpoint
 tofu output tunnel2_outside_ip   # AWS VGW tunnel 2 endpoint
 tofu output ec2_private_ip       # ping target inside the VPC
+tofu output -json | python3 -c "import json,sys; d=json.load(sys.stdin); [print(k,'=',v['value']) for k,v in d.items() if not v.get('sensitive')]"
 ```
 
 ### Test the migration tool against it
 
 ```bash
-# 1. Capture the 2911 (or your test router) running config
-ssh admin@<router-ip> "show running-config" > running.cfg
+# 1. Capture the running config
+ssh -o KexAlgorithms=diffie-hellman-group14-sha1 admin@c2911.internal "show running-config" > running.cfg
 
-# 2. Audit — should show WEAK-GROUP:2 at minimum for default IOS config
+# 2. Audit — should show WEAK-PFS and VTI/BGP detected
 python3 ikev1_to_ikev2_migrate.py --config-file running.cfg --audit-only
 
 # 3. Generate IKEv2 additions
 python3 ikev1_to_ikev2_migrate.py --config-file running.cfg > ikev2_additions.txt
 
-# 4. Apply to router, then verify
+# 4. Apply to router (IOS XE only — IOS 15.7 on 2911 cannot initiate IKEv2 for VTI)
 # show crypto ikev2 sa   → expect READY, AES-CBC/SHA512/DH-21
-# ping <ec2_private_ip> source <lan-ip> repeat 10
+# show ip bgp summary    → expect Established (BGP unchanged)
+# ping <ec2_private_ip> source Loopback0 repeat 10
 ```
 
 ### Tear down (stop billing)

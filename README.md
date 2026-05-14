@@ -8,13 +8,16 @@ Validated end-to-end against a live AWS Virtual Private Gateway: IKEv2 SA READY 
 
 ## How it works
 
-The migration is **additive** — IKEv1 config is left completely untouched. New IKEv2 objects are placed alongside. The activation switch is one line per crypto map entry:
+The migration is **additive** — IKEv1 config is left completely untouched. New IKEv2 objects are placed alongside. The activation switch is a single line, and differs by VPN type:
 
-```
-set ikev2-profile <name>
-```
+| VPN type | Activation switch location |
+|---|---|
+| Policy-based (crypto map) | `set ikev2-profile <name>` under each `crypto map` entry |
+| Route-based VTI + BGP | `set ikev2-profile <name>` under each `crypto ipsec profile` |
 
 Add it → IKEv2. Remove it → IKEv1. No other changes needed to roll back.
+
+IKEv1 and IKEv2 **can coexist** on the same device and ports (UDP 500/4500). Every IKE packet carries a Major Version field in the header; IOS XE maintains separate SA databases. This lets you apply IKEv2 config and wait for natural SA expiry rather than clearing sessions.
 
 ---
 
@@ -54,6 +57,8 @@ python3 ikev1_to_ikev2_migrate.py \
 
 ## What gets generated
 
+### Policy-based VPN (crypto map)
+
 | IKEv1 object | IKEv2 replacement |
 |---|---|
 | `crypto isakmp policy` | `crypto ikev2 proposal` + `crypto ikev2 policy` |
@@ -61,6 +66,17 @@ python3 ikev1_to_ikev2_migrate.py \
 | *(no equivalent)* | `crypto ikev2 profile` (per-peer coordinator) |
 | `crypto ipsec transform-set` | Reused or upgraded to `esp-aes 256 esp-sha512-hmac` |
 | `crypto map … set peer` | `crypto map … set ikev2-profile` added |
+
+### Route-based VPN (VTI + BGP)
+
+| IKEv1 object | IKEv2 replacement / note |
+|---|---|
+| `crypto isakmp policy` | `crypto ikev2 proposal` + `crypto ikev2 policy` |
+| `crypto isakmp key` | `crypto ikev2 keyring` (peer IPs matched to tunnel destinations) |
+| *(no equivalent)* | `crypto ikev2 profile` |
+| `crypto ipsec profile … set transform-set` | Upgraded transform-set if weak; `set ikev2-profile` added |
+| `interface TunnelX` config | **Unchanged** — tunnel source/dest/IP preserved |
+| `router bgp` config | **Unchanged** — BGP runs over tunnel inside IPs, unaffected by IKE version |
 
 Algorithms used: **AES-CBC-256 / SHA-512 / PRF SHA-512 / DH group 21 / PFS group21** — confirmed available on ISR4431 IOS XE 17.09.05a, within the AWS VGW supported set, and clear of all FN72510 blocked values.
 
@@ -104,13 +120,15 @@ tofu destroy   # when done — ~$0.05/hr while running
 ## Target platform
 
 - **Production:** Cisco ISR4431, IOS XE 17.09.05a
-- **Lab validated:** Cisco ISR 2911, IOS 15.7(3)M3, behind OPNsense NAT-T
-- **AWS:** Site-to-Site VPN with Virtual Private Gateway (static routing, two tunnels)
+- **Lab validated (IKEv1 VTI/BGP end-to-end):** Cisco ISR 2911, IOS 15.7(3)M3, behind OPNsense NAT-T
+- **AWS:** Site-to-Site VPN with Virtual Private Gateway (BGP/dynamic routing, two tunnels)
 
 ## Known limitations
 
 - Type 6 encrypted PSKs are not decryptable — tool emits a placeholder you must replace
 - RESTCONF device mode is structurally complete but not yet validated against a live ISR4431
 - Classic IOS (15.x) supported in file mode only — no RESTCONF
+- **IOS 15.7 / classic IOS (C2900) cannot initiate IKEv2 for VTI tunnels** — this is a platform limitation. The tool generates correct IKEv2 config; IKEv2 VTI validation requires IOS XE (ISR4431, CSR1000v, Cat8000v)
+- **Do not set Phase 2 algorithm restrictions on the AWS VPN connection** unless you have verified exact algorithm alignment — AWS immediately rejects IKEv1 Phase 2 proposals that don't match, causing `PROPOSAL_NOT_CHOSEN` before any SA is established
 
-See `HOWTO.md` section 13 for the full list.
+See `HOWTO.md` section 14 for the full list.
