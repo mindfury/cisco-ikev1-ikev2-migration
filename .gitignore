@@ -16,6 +16,7 @@ terraform/terraform.tfvars
 
 # Router configs with live PSKs
 running.cfg
+*-running.cfg
 *.cfg.bak
 
 # AWS credentials / temp files

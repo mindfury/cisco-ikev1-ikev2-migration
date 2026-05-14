@@ -1,11 +1,16 @@
-# Copy this file to terraform.tfvars and fill in the values.
+# Copy to terraform.tfvars and fill in real values.
 # terraform.tfvars is gitignored — never commit PSKs.
 
-router_public_ip = "68.48.149.112"   # or resolve mindfury.duckdns.org first
+aws_region       = "us-east-1"
+router_public_ip = "68.48.149.112"   # resolve mindfury.duckdns.org first if dynamic
+router_bgp_asn   = 65000
 onprem_cidr      = "10.0.1.0/24"
 vpc_cidr         = "10.10.0.0/16"
 subnet_cidr      = "10.10.1.0/24"
-aws_region       = "us-east-1"
+
+# false = BGP/VTI mode (default, for testing VTI migration path)
+# true  = static-route/crypto-map mode (original lab)
+static_routes_only = false
 
 tunnel1_psk = "LabChangeMe1111111"   # 8-64 chars, alphanumeric + _ + . only
 tunnel2_psk = "LabChangeMe2222222"   # must differ from tunnel1_psk

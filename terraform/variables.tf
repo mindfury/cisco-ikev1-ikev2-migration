@@ -5,8 +5,14 @@ variable "aws_region" {
 }
 
 variable "router_public_ip" {
-  description = "Current public IP of the on-premises Cisco router (check mindfury.duckdns.org)"
+  description = "Current public IP of the on-premises Cisco router (resolve mindfury.duckdns.org first if dynamic)"
   type        = string
+}
+
+variable "router_bgp_asn" {
+  description = "BGP ASN of the on-premises router"
+  type        = number
+  default     = 65000
 }
 
 variable "onprem_cidr" {
@@ -25,6 +31,12 @@ variable "subnet_cidr" {
   description = "Subnet CIDR for EC2 target instances"
   type        = string
   default     = "10.10.1.0/24"
+}
+
+variable "static_routes_only" {
+  description = "false = BGP/VTI mode (default); true = policy-based/static-route mode"
+  type        = bool
+  default     = false
 }
 
 variable "tunnel1_psk" {
