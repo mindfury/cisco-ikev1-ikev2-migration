@@ -784,5 +784,65 @@ class TestEndToEnd(unittest.TestCase):
         self.assertNotIn("no crypto map", out)
 
 
+# Route-based AWS VPN with VTI + BGP.  This is the production shape that the
+# original crypto-map-only tool missed.
+VTI_BGP_CONFIG = """\
+version 15.7
+crypto isakmp policy 10
+ encr 3des
+ hash md5
+ authentication pre-share
+ group 2
+ lifetime 28800
+crypto isakmp key VtiPsk1 address 52.0.0.1
+crypto ipsec transform-set AWS-VTI-TS esp-3des esp-md5-hmac
+ mode tunnel
+crypto ipsec profile AWS-VTI-PROFILE
+ set transform-set AWS-VTI-TS
+ set pfs group2
+interface Tunnel1
+ ip address 169.254.10.2 255.255.255.252
+ tunnel source GigabitEthernet0/0
+ tunnel mode ipsec ipv4
+ tunnel destination 52.0.0.1
+ tunnel protection ipsec profile AWS-VTI-PROFILE
+router bgp 65000
+ neighbor 169.254.10.1 remote-as 7224
+ neighbor 169.254.10.1 timers 10 30 30
+ address-family ipv4
+  neighbor 169.254.10.1 activate
+"""
+
+
+class TestVtiBgpSupport(unittest.TestCase):
+
+    def test_vti_objects_parsed(self):
+        p = ConfigParser(VTI_BGP_CONFIG)
+        self.assertIn("AWS-VTI-PROFILE", p.ipsec_profiles)
+        self.assertIn("Tunnel1", p.tunnel_interfaces)
+        self.assertEqual(p.tunnel_interfaces["Tunnel1"].destination, "52.0.0.1")
+        self.assertEqual(p.tunnel_interfaces["Tunnel1"].protection_profile, "AWS-VTI-PROFILE")
+        self.assertIn("169.254.10.1", p.bgp_neighbors)
+
+    def test_vti_profile_gets_ikev2_binding_and_bgp_note(self):
+        p = ConfigParser(VTI_BGP_CONFIG)
+        out = IKEv2ConfigGenerator(p).generate()
+        self.assertIn("crypto ipsec transform-set AWS-VTI-TS-V2", out)
+        self.assertIn("crypto ipsec profile AWS-VTI-PROFILE", out)
+        self.assertIn("set transform-set AWS-VTI-TS-V2", out)
+        self.assertIn("set pfs group21", out)
+        self.assertIn("set ikev2-profile AWS-IKEV2-PROFILE", out)
+        self.assertIn("BGP config is intentionally not changed", out)
+        self.assertIn("169.254.10.1 remote-as 7224", out)
+        self.assertNotIn("crypto map", out)
+
+    def test_vti_peer_filter(self):
+        p = ConfigParser(VTI_BGP_CONFIG)
+        out = IKEv2ConfigGenerator(p, aws_peer_filter="203.0.113.1").generate()
+        self.assertIn("No crypto map entries requiring IKEv2 migration", out)
+        out = IKEv2ConfigGenerator(p, aws_peer_filter="52.0.0.1").generate()
+        self.assertIn("crypto ipsec profile AWS-VTI-PROFILE", out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

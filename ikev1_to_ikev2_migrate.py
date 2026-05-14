@@ -155,6 +155,31 @@ class CryptoMapEntry:
     sa_lifetime: Optional[str] = None
 
 
+@dataclass
+class IpsecProfile:
+    name: str
+    transform_sets: list = field(default_factory=list)
+    pfs: Optional[str] = None
+    ikev2_profile: Optional[str] = None
+
+
+@dataclass
+class TunnelInterface:
+    name: str
+    ip_address: Optional[str] = None
+    ip_mask: Optional[str] = None
+    source: Optional[str] = None
+    destination: Optional[str] = None
+    mode: Optional[str] = None
+    protection_profile: Optional[str] = None
+
+
+@dataclass
+class BgpNeighbor:
+    ip: str
+    remote_as: Optional[str] = None
+
+
 # ---------------------------------------------------------------------------
 # File-based config parser (unchanged from original)
 # ---------------------------------------------------------------------------
@@ -168,6 +193,9 @@ class ConfigParser:
         self.isakmp_keys: list[IsakmpKey] = []
         self.transform_sets: dict[str, TransformSet] = {}
         self.crypto_maps: dict[tuple, CryptoMapEntry] = {}
+        self.ipsec_profiles: dict[str, IpsecProfile] = {}
+        self.tunnel_interfaces: dict[str, TunnelInterface] = {}
+        self.bgp_neighbors: dict[str, BgpNeighbor] = {}
         self._parse()
 
     def _parse(self):
@@ -192,7 +220,7 @@ class ConfigParser:
                         policy.lifetime = sub.split()[1]
                     elif sub.startswith('authentication '):
                         policy.auth = sub.split(None, 1)[1]
-                    elif sub.startswith('crypto ') or sub.startswith('!'):
+                    elif self._is_top_level_boundary(sub):
                         break
                     i += 1
                 # Fill in IOS defaults for omitted lines — these are the values
@@ -225,10 +253,70 @@ class ConfigParser:
                     sub = self.lines[i].strip()
                     if sub.startswith('mode '):
                         ts.mode = sub.split()[1]
-                    elif sub.startswith('crypto ') or sub.startswith('!'):
+                    elif self._is_top_level_boundary(sub):
                         break
                     i += 1
                 self.transform_sets[name] = ts
+                continue
+
+
+            m = re.match(r'^crypto ipsec profile\s+(\S+)', line)
+            if m:
+                name = m.group(1)
+                prof = IpsecProfile(name=name)
+                i += 1
+                while i < len(self.lines):
+                    sub = self.lines[i].strip()
+                    if re.match(r'^set transform-set\s+', sub):
+                        prof.transform_sets = sub.split()[2:]
+                    elif re.match(r'^set pfs\s+', sub):
+                        prof.pfs = sub.split()[-1]
+                    elif re.match(r'^set ikev2-profile\s+', sub):
+                        prof.ikev2_profile = sub.split()[-1]
+                    elif self._is_top_level_boundary(sub):
+                        break
+                    i += 1
+                self.ipsec_profiles[name] = prof
+                continue
+
+            m = re.match(r'^interface\s+(Tunnel\S+)', line, re.IGNORECASE)
+            if m:
+                name = m.group(1)
+                tun = TunnelInterface(name=name)
+                i += 1
+                while i < len(self.lines):
+                    sub = self.lines[i].strip()
+                    if re.match(r'^ip address\s+', sub):
+                        parts = sub.split()
+                        if len(parts) >= 4:
+                            tun.ip_address = parts[2]
+                            tun.ip_mask = parts[3]
+                    elif re.match(r'^tunnel source\s+', sub):
+                        tun.source = sub.split(None, 2)[2]
+                    elif re.match(r'^tunnel destination\s+', sub):
+                        tun.destination = sub.split(None, 2)[2]
+                    elif re.match(r'^tunnel mode\s+', sub):
+                        tun.mode = sub.split(None, 2)[2]
+                    elif re.match(r'^tunnel protection ipsec profile\s+', sub):
+                        tun.protection_profile = sub.split()[-1]
+                    elif self._is_top_level_boundary(sub):
+                        break
+                    i += 1
+                self.tunnel_interfaces[name] = tun
+                continue
+
+            m = re.match(r'^router bgp\s+(\S+)', line)
+            if m:
+                i += 1
+                while i < len(self.lines):
+                    sub = self.lines[i].strip()
+                    nm = re.match(r'^neighbor\s+(\S+)\s+remote-as\s+(\S+)', sub)
+                    if nm:
+                        ip, remote_as = nm.group(1), nm.group(2)
+                        self.bgp_neighbors[ip] = BgpNeighbor(ip=ip, remote_as=remote_as)
+                    elif self._is_top_level_boundary(sub):
+                        break
+                    i += 1
                 continue
 
             m = re.match(r'^crypto map\s+(\S+)\s+(\d+)\s+ipsec-isakmp', line)
@@ -250,13 +338,19 @@ class ConfigParser:
                         entry.ikev2_profile = sub.split()[-1]
                     elif re.match(r'^set security-association lifetime\s+', sub):
                         entry.sa_lifetime = ' '.join(sub.split()[3:])
-                    elif sub.startswith('crypto ') or sub.startswith('!'):
+                    elif self._is_top_level_boundary(sub):
                         break
                     i += 1
                 self.crypto_maps[(map_name, seq)] = entry
                 continue
 
             i += 1
+
+    @staticmethod
+    def _is_top_level_boundary(line: str) -> bool:
+        if not line or line.startswith('!'):
+            return True
+        return bool(re.match(r'^(crypto |interface |router |ip access-list |access-list |line |class-map |policy-map )', line))
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +426,9 @@ class RestconfConfigParser:
         self.isakmp_keys:     list[IsakmpKey]    = []
         self.transform_sets:  dict[str, TransformSet]      = {}
         self.crypto_maps:     dict[tuple, CryptoMapEntry]  = {}
+        self.ipsec_profiles:  dict[str, IpsecProfile]      = {}
+        self.tunnel_interfaces: dict[str, TunnelInterface] = {}
+        self.bgp_neighbors:   dict[str, BgpNeighbor]       = {}
         self._raw: dict = {}
         self._fetch(client)
 
@@ -509,40 +606,68 @@ class IKEv2ConfigGenerator:
             targets.append(entry)
         return targets
 
+    def _target_vti_tunnels(self) -> list[TunnelInterface]:
+        targets = []
+        for tun in getattr(self.p, "tunnel_interfaces", {}).values():
+            if not tun.destination or not tun.protection_profile:
+                continue
+            prof = getattr(self.p, "ipsec_profiles", {}).get(tun.protection_profile)
+            if not prof or prof.ikev2_profile:
+                continue
+            if self.aws_peer_filter and tun.destination != self.aws_peer_filter:
+                continue
+            targets.append(tun)
+        return targets
+
+    def _peer_ips_for_targets(self, entries: list[CryptoMapEntry],
+                              tunnels: list[TunnelInterface]) -> set[str]:
+        return {e.peer for e in entries if e.peer} | {t.destination for t in tunnels if t.destination}
+
     def _peers_for_entries(self, entries: list[CryptoMapEntry]) -> list[IsakmpKey]:
-        peer_ips = {e.peer for e in entries if e.peer}
+        """Compatibility helper for RESTCONF crypto-map payload builder."""
+        return self._peers_for_targets(entries, [])
+
+    def _peers_for_targets(self, entries: list[CryptoMapEntry],
+                           tunnels: list[TunnelInterface]) -> list[IsakmpKey]:
+        peer_ips = self._peer_ips_for_targets(entries, tunnels)
         matched, seen = [], set()
         for key in self.p.isakmp_keys:
             if key.peer_ip in peer_ips and key.peer_ip not in seen:
                 matched.append(key)
                 seen.add(key.peer_ip)
-        for ip in peer_ips:
+        for ip in sorted(peer_ips):
             if ip not in seen:
                 self._warn(
-                    f"Peer {ip} in crypto map has no matching 'crypto isakmp key' entry. "
+                    f"Peer {ip} has no matching 'crypto isakmp key' entry. "
                     f"Supply the PSK manually in the generated keyring."
                 )
                 matched.append(IsakmpKey(key="<PSK_UNKNOWN_REPLACE_ME>", peer_ip=ip))
                 seen.add(ip)
         return matched
 
-    def _weak_transform_sets(self, entries: list[CryptoMapEntry]) -> dict[str, TransformSet]:
+    def _weak_transform_sets(self, entries: list[CryptoMapEntry],
+                             tunnels: list[TunnelInterface] | None = None) -> dict[str, TransformSet]:
         used = set()
         for e in entries:
             used.update(e.transform_sets)
+        for tun in tunnels or []:
+            prof = getattr(self.p, "ipsec_profiles", {}).get(tun.protection_profile or "")
+            if prof:
+                used.update(prof.transform_sets)
         return {n: self.p.transform_sets[n] for n in used
                 if n in self.p.transform_sets and self.p.transform_sets[n].has_weak_algo()}
 
     def generate(self) -> str:
         targets = self._target_entries()
-        if not targets:
+        vti_targets = self._target_vti_tunnels()
+        if not targets and not vti_targets:
             return (
-                "! --- No crypto map entries requiring IKEv2 migration found.\n"
+                "! --- No crypto map entries requiring IKEv2 migration found; no VTI/IPsec profile entries requiring migration found.\n"
                 "! --- (All entries either already have ikev2-profile set, or\n"
                 "!     no matching peer filter was found.)\n"
             )
-        peers   = self._peers_for_entries(targets)
-        weak_ts = self._weak_transform_sets(targets)
+        peers   = self._peers_for_targets(targets, vti_targets)
+        weak_ts = self._weak_transform_sets(targets, vti_targets)
 
         self._emit("! ================================================================")
         self._emit("! IKEv2 Migration Config — generated by ikev1_to_ikev2_migrate.py")
@@ -558,7 +683,11 @@ class IKEv2ConfigGenerator:
         self._gen_keyring(peers)
         self._gen_profile(peers)
         self._gen_transform_sets(weak_ts)
-        self._gen_crypto_map_updates(targets, weak_ts)
+        if targets:
+            self._gen_crypto_map_updates(targets, weak_ts)
+        if vti_targets:
+            self._gen_vti_profile_updates(vti_targets, weak_ts)
+            self._gen_bgp_notes(vti_targets)
         self._gen_fragmentation()
         if self.warnings:
             self._emit()
@@ -590,7 +719,7 @@ class IKEv2ConfigGenerator:
 
     def _gen_keyring(self, peers: list[IsakmpKey]):
         self._emit("! ---- IKEv2 Keyring ----")
-        self._emit("! AWS S2S VPN uses asymmetric PSKs (local != remote).")
+        self._emit("! Standard AWS S2S VPN uses the same PSK for local and remote on each tunnel.")
         self._emit("! Replace the pre-shared-key values with those from the")
         self._emit("! AWS VPN configuration download for each tunnel endpoint.")
         self._emit("crypto ikev2 keyring AWS-IKEV2-KEYRING")
@@ -661,6 +790,49 @@ class IKEv2ConfigGenerator:
                     self._emit(f" set pfs {MODERN_PFS_GROUP}")
                 self._emit(" set ikev2-profile AWS-IKEV2-PROFILE")
                 self._emit("!")
+
+
+    def _gen_vti_profile_updates(self, tunnels: list[TunnelInterface],
+                                 weak_ts: dict[str, TransformSet]):
+        self._emit("! ---- VTI / crypto ipsec profile updates ----")
+        self._emit("! Route-based VPNs keep Tunnel interfaces and BGP unchanged.")
+        self._emit("! The IKEv2 binding belongs under the crypto ipsec profile used by tunnel protection.")
+        self._emit()
+        seen_profiles = set()
+        for tun in sorted(tunnels, key=lambda t: t.name):
+            prof = self.p.ipsec_profiles.get(tun.protection_profile or "")
+            if not prof or prof.name in seen_profiles:
+                continue
+            seen_profiles.add(prof.name)
+            self._emit(f"! {tun.name}: destination {tun.destination}, tunnel protection ipsec profile {prof.name}")
+            self._emit(f"crypto ipsec profile {prof.name}")
+            new_ts = [f"{n}-V2" if n in weak_ts else n for n in prof.transform_sets]
+            if new_ts:
+                self._emit(f" set transform-set {' '.join(new_ts)}")
+            if prof.pfs and prof.pfs.lower() in WEAK_PFS_GROUPS:
+                self._emit(f" ! replacing weak PFS {prof.pfs}")
+                self._emit(f" set pfs {MODERN_PFS_GROUP}")
+            elif prof.pfs:
+                self._emit(f" set pfs {prof.pfs}")
+            else:
+                self._emit(f" set pfs {MODERN_PFS_GROUP}")
+            self._emit(" set ikev2-profile AWS-IKEV2-PROFILE")
+            self._emit("!")
+
+    def _gen_bgp_notes(self, tunnels: list[TunnelInterface]):
+        if not getattr(self.p, "bgp_neighbors", {}):
+            return
+        tunnel_ips = {t.ip_address for t in tunnels if t.ip_address}
+        neighbors = []
+        for nbr in self.p.bgp_neighbors.values():
+            neighbors.append(f"{nbr.ip} remote-as {nbr.remote_as}")
+        self._emit("! ---- BGP over VTI review ----")
+        self._emit("! BGP config is intentionally not changed by IKEv1→IKEv2 migration.")
+        self._emit("! Confirm AWS inside tunnel IPs / BGP neighbors remain unchanged after tunnel rekeys.")
+        if tunnel_ips:
+            self._emit(f"! Local tunnel IPs detected: {', '.join(sorted(tunnel_ips))}")
+        self._emit(f"! BGP neighbors detected: {', '.join(sorted(neighbors))}")
+        self._emit("!")
 
     def _gen_fragmentation(self):
         self._emit("! ---- IKEv2 fragmentation ----")
@@ -997,6 +1169,16 @@ def validation_report(parsed, targets: list[CryptoMapEntry]) -> str:
     for e in targets:
         lines.append(f"!   {e.map_name} seq {e.seq}: peer={e.peer} "
                      f"ts={e.transform_sets} pfs={e.pfs}")
+    vti_targets = IKEv2ConfigGenerator(parsed)._target_vti_tunnels()
+    lines.append(f"! VTI/IPsec profile entries targeted for migration: {len(vti_targets)}")
+    for t in vti_targets:
+        prof = parsed.ipsec_profiles.get(t.protection_profile) if hasattr(parsed, "ipsec_profiles") else None
+        lines.append(f"!   {t.name}: peer={t.destination} profile={t.protection_profile} "
+                     f"ts={prof.transform_sets if prof else []} pfs={prof.pfs if prof else None}")
+    if getattr(parsed, "bgp_neighbors", {}):
+        lines.append("! BGP neighbors detected over/near tunnel config; BGP is not modified:")
+        for n in parsed.bgp_neighbors.values():
+            lines.append(f"!   neighbor {n.ip} remote-as {n.remote_as}")
     lines.append("!")
     lines.append("! ================================================================")
     lines.append("!")
