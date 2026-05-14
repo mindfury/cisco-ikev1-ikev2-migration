@@ -90,6 +90,14 @@ resource "aws_security_group" "lab" {
   }
 
   ingress {
+    description = "ICMP from home LAN"
+    from_port   = -1
+    to_port     = -1
+    protocol    = "icmp"
+    cidr_blocks = ["192.168.1.0/24"]
+  }
+
+  ingress {
     description = "ICMP within VPC"
     from_port   = -1
     to_port     = -1
