@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Secrets — never commit these
+terraform/terraform.tfvars
+*.tfstate
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+
+# Router configs with live PSKs
+running.cfg
+*.cfg.bak
+
+# AWS credentials / temp files
+*.csv
+/tmp/
