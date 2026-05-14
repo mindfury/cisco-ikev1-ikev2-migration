@@ -113,6 +113,7 @@ tofu destroy   # when done — ~$0.05/hr while running
 | File | Contents |
 |---|---|
 | `HOWTO.md` | Step-by-step migration guide, AWS side preparation, rollback, troubleshooting |
+| `DIAGRAMS.md` | Dependency graphs — AWS lab objects, Cisco IKEv1 VTI/BGP config, IKEv2 additions, full packet path |
 | `IPsec-VPN-Primer.md` | Visual primer with Mermaid diagrams — IKEv1/IKEv2 object relationships, two-phase model, AWS architecture, Cisco↔AWS Rosetta Stone |
 
 ---
