@@ -2,7 +2,7 @@
 
 Migrates Cisco IOS / IOS XE IPsec VPN tunnels from IKEv1 to IKEv2, driven by Cisco Field Notice **FN72510** — weak crypto algorithms (DES/3DES, MD5, DH groups 1/2/5/24) are blocked in IOS XE 17.11+. Any tunnel using those algorithms will drop on the first IKE renegotiation after upgrading.
 
-Validated end-to-end against a live AWS Virtual Private Gateway: IKEv2 SA READY (AES-CBC-256 / SHA-512 / DH group 21), traffic flowing, rollback confirmed.
+IKEv2 SA establishment validated end-to-end for policy-based (crypto map) VPNs against a live AWS Virtual Private Gateway on a Cisco ISR 4431: SA READY (AES-CBC-256 / SHA-512 / DH group 21), traffic flowing, rollback confirmed. IKEv1 VTI/BGP baseline validated on ISR 2911; IKEv2 VTI/BGP requires IOS XE and has not yet been validated end-to-end.
 
 ---
 
@@ -85,10 +85,10 @@ Algorithms used: **AES-CBC-256 / SHA-512 / PRF SHA-512 / DH group 21 / PFS group
 ## Tests
 
 ```bash
-python3 -m pytest test_ikev1_to_ikev2_migrate.py -v
+python3 test_ikev1_to_ikev2_migrate.py
 ```
 
-101 tests covering parser edge cases (IOS abbreviations, implicit defaults), weak-algorithm detection, IKEv2 config generation, YANG payload structure, and end-to-end output correctness. No network access required.
+104 tests covering parser edge cases (IOS abbreviations, implicit defaults), weak-algorithm detection, IKEv2 config generation, YANG payload structure, and end-to-end output correctness. No network access or pytest required.
 
 ---
 

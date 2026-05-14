@@ -6,7 +6,7 @@ Cisco IOS XE IKEv1 → IKEv2 migration helper for AWS Site-to-Site VPNs.
 
 Primary script: `ikev1_to_ikev2_migrate.py`  
 Tests: `test_ikev1_to_ikev2_migrate.py`  
-Migration procedure: `MIGRATION.md`
+Migration procedure: `HOWTO.md`
 
 ```bash
 python3 test_ikev1_to_ikev2_migrate.py   # 104 tests, no pytest required

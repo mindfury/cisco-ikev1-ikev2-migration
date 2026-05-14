@@ -2,7 +2,7 @@
 
 **Target platform:** Cisco ISR4431, IOS XE 17.09.05a  
 **Migration driver:** Field Notice FN72510 — weak crypto algorithms blocked in IOS XE 17.11+  
-**Validation status:** End-to-end tested against live AWS VGW from a Cisco ISR 2911 (IOS 15.7(3)M3) in a NAT'd home lab environment
+**Validation status:** IKEv2 policy-based (crypto map) validated end-to-end on ISR 4431 / IOS XE 17.09.05a against a live AWS VGW. IKEv1 VTI/BGP baseline validated on ISR 2911 / IOS 15.7(3)M3 in a NAT'd home lab. IKEv2 VTI/BGP requires IOS XE and has not yet been validated end-to-end.
 
 ---
 
@@ -446,7 +446,7 @@ ping <ec2-ip> source <loopback-or-lan-ip> repeat 10
 
 **Never paste the generated config directly without reviewing these items:**
 
-### 7.1 PSK values
+### 8.1 PSK values
 
 The keyring will contain PSKs copied from your `crypto isakmp key` lines:
 
@@ -462,16 +462,16 @@ Verify against the AWS VPN configuration download:
 - Are these the PSKs AWS expects?
 - If the IOS config stored them as type 6 encrypted (`key 6 <blob>`), the tool will output `<PSK_TYPE6_ENCRYPTED_REPLACE_ME>` — you must substitute the plaintext value
 
-### 7.2 Peer IP addresses
+### 8.2 Peer IP addresses
 
 Confirm the peer addresses in the keyring match the **AWS VGW outside IP addresses** from the VPN configuration download. These are the addresses you already have in your `crypto isakmp key` and `set peer` lines.
 
-### 7.3 Transform-set selection
+### 8.3 Transform-set selection
 
 - If the existing transform-set was weak (3DES/MD5), the tool creates a `*-V2` replacement using `esp-aes 256 esp-sha512-hmac` — confirm this combination is supported on your platform (confirmed available on ISR4431/17.09.05a)
 - If the existing transform-set was already acceptable (e.g., `esp-aes esp-sha-hmac`), the tool keeps the original name and only adds `set ikev2-profile` and upgrades PFS
 
-### 7.4 The `identity local address` placeholder
+### 8.4 The `identity local address` placeholder
 
 ```
 crypto ikev2 profile AWS-IKEV2-PROFILE
@@ -484,7 +484,7 @@ The commented-out `identity local address` line is intentionally left for you to
 - If the router is behind NAT (unlikely for an ISR4431 in a typical datacenter/branch setup, but possible), the identity will default to the interface IP. NAT-T will handle the NAT traversal automatically — `identity local address` is still beneficial to explicitly set for AWS identity matching
 - If omitted, the device uses its WAN interface IP as its IKEv2 identity — this works for most deployments
 
-### 7.5 Profile match scope
+### 8.5 Profile match scope
 
 ```
  match identity remote address 0.0.0.0
@@ -497,7 +497,7 @@ This matches **any** IKEv2 peer, relying on the keyring to enforce peer-specific
  match identity remote address 5.6.7.8 255.255.255.255
 ```
 
-### 7.6 SA lifetime
+### 8.6 SA lifetime
 
 The generated profile uses `lifetime 28800` (8 hours) to match AWS's IKEv2 default. AWS will also send its preferred lifetime in the IKE_SA_INIT; the lower of the two will be used. Do not shorten this without understanding the AWS DPD and rekey behaviour.
 
@@ -858,7 +858,7 @@ If tunnels go down and no IKEv2 activity is seen at all — no `IKEv2:(INIT)` li
 ### Running the test suite
 
 ```bash
-python3 -m pytest test_ikev1_to_ikev2_migrate.py -v
+python3 test_ikev1_to_ikev2_migrate.py
 ```
 
 All 104 tests should pass. This validates the parser, weak-algorithm detection, config generation, VTI/BGP support, YANG payload structure, and end-to-end output correctness without requiring any network access.
