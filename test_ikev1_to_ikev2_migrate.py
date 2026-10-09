@@ -794,7 +794,7 @@ crypto isakmp policy 10
  authentication pre-share
  group 2
  lifetime 28800
-crypto isakmp key VtiPsk1 address 52.0.0.1
+crypto isakmp key VtiPsk1 address 192.0.2.1
 crypto ipsec transform-set AWS-VTI-TS esp-3des esp-md5-hmac
  mode tunnel
 crypto ipsec profile AWS-VTI-PROFILE
@@ -804,7 +804,7 @@ interface Tunnel1
  ip address 169.254.10.2 255.255.255.252
  tunnel source GigabitEthernet0/0
  tunnel mode ipsec ipv4
- tunnel destination 52.0.0.1
+ tunnel destination 192.0.2.1
  tunnel protection ipsec profile AWS-VTI-PROFILE
 router bgp 65000
  neighbor 169.254.10.1 remote-as 7224
@@ -820,7 +820,7 @@ class TestVtiBgpSupport(unittest.TestCase):
         p = ConfigParser(VTI_BGP_CONFIG)
         self.assertIn("AWS-VTI-PROFILE", p.ipsec_profiles)
         self.assertIn("Tunnel1", p.tunnel_interfaces)
-        self.assertEqual(p.tunnel_interfaces["Tunnel1"].destination, "52.0.0.1")
+        self.assertEqual(p.tunnel_interfaces["Tunnel1"].destination, "192.0.2.1")
         self.assertEqual(p.tunnel_interfaces["Tunnel1"].protection_profile, "AWS-VTI-PROFILE")
         self.assertIn("169.254.10.1", p.bgp_neighbors)
 
@@ -840,7 +840,7 @@ class TestVtiBgpSupport(unittest.TestCase):
         p = ConfigParser(VTI_BGP_CONFIG)
         out = IKEv2ConfigGenerator(p, aws_peer_filter="203.0.113.1").generate()
         self.assertIn("No crypto map entries requiring IKEv2 migration", out)
-        out = IKEv2ConfigGenerator(p, aws_peer_filter="52.0.0.1").generate()
+        out = IKEv2ConfigGenerator(p, aws_peer_filter="192.0.2.1").generate()
         self.assertIn("crypto ipsec profile AWS-VTI-PROFILE", out)
 
 
